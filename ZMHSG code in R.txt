@@ -1,0 +1,397 @@
+
+ library(MASS)
+ library(truncnorm)
+ library(LearnBayes)
+ library(tmvtnorm)
+
+#**************************************************************************
+#                   Derive form truncated Gamma
+#**************************************************************************
+
+rtigamma<-function(s,r,L,U){
+  g<-0
+  while(g<L | g>U)   g<-rigamma(1,s,r)
+  return(g)
+}
+
+#**************************************************************************
+#                        Distance Matrix
+#**************************************************************************
+
+DISTANCE<-function(coord,n){
+	DIST<-matrix(0,nrow=n,ncol=n)
+	for(i in 1:(n-1)){
+		DIST[i,i]<-0
+		for(j in (i+1):n){
+			DIST[i,j]<-sqrt((coord[i,1]-coord[j,1])^2+(coord[i,2]-coord[j,2])^2)
+			DIST[j,i]<-DIST[i,j]
+            }
+       }
+return(DIST)         
+}
+
+#**************************************************************************
+#                        Correlation Matrix
+#**************************************************************************
+
+CORRELATION<-function(DIST,theta,kappa){
+	CORR<-exp(-DIST^kappa/theta)
+      CHOL.C<-chol(CORR)
+	ICORR<-chol2inv(CHOL.C)
+      deter<-prod(diag(CHOL.C)^2)
+
+ list(CORR,ICORR,deter)
+}
+
+#**************************************************************************
+#                         *  P R E D I C T I O N   *
+#**************************************************************************
+
+ predic<-function(Dpr,Dpa,Dpp,IO,Car,SL,kappa,theta,sig2,beta,alpha,H,Uc){
+
+   Cpr<-exp(-Dpr^kappa/theta);
+   Cpa<-exp(-Dpa^kappa/theta); 
+   Cpp<-exp(-Dpp^kappa/theta); 
+ 
+   M.h0<-alpha*Cpr%*%SL%*%Uc+Cpa%*%IO%*%(H-alpha*Car%*%SL%*%Uc)
+   S.h0<-sig2*(Cpp-Cpa%*%IO%*%t(Cpa))
+   H0<-as.vector(rmvnorm(1,as.vector(M.h0),S.h0))
+   return(H0)
+ }
+
+#==========================================================================
+
+#              *******************************************            
+#=======                       ZMHSG Model                      =========
+#              *******************************************            
+
+#==========================================================================
+
+ZMHSG<-function(coord.y,coord.p,simulate,burnin,Break,pred,Fix.kappa,n.cluster,initial,hyper,tuning){
+
+Y0<-coord.y[,3]
+coord.a<-coord.y[order(Y0),1:2]
+Y<-coord.y[order(Y0),3]; 
+
+cut<-summary(Y)[[4]]; 
+big.y<-which(Y>cut)
+coord.big<-coord.a[big.y,]; coord.sm<-coord.a[-big.y,];
+
+  nclu1<-n.cluster[[1]];nclu2<-n.cluster[[2]]; nclu<-nclu1+nclu2
+  km1 <- kmeans(coord.sm, centers = nclu1, iter.max = 100,nstart=nrow(coord.sm))
+  km2 <- kmeans(coord.big,centers = nclu2, iter.max = 100,nstart=nrow(coord.big))
+
+plot(coord.sm[,1], coord.sm[,2], col = km1$cluster, pch = 20,xlim=c(0,11),ylim=c(0,11))
+points(coord.big[,1], coord.big[,2], col = km2$cluster, pch = 15,xlim=c(0,11),ylim=c(0,11))
+
+coord.r1<-km1$centers
+points(coord.r1[,1],coord.r1[,2],xlim=c(0,11),ylim=c(0,11))
+coord.r2<-km2$centers
+points(coord.r2[,1],coord.r2[,2],xlim=c(0,11),ylim=c(0,11))
+
+coord.r<-rbind(coord.r1,coord.r2)
+coord<-rbind(coord.r,coord.a)
+n.r<-nrow(coord.r); n.a<-nrow(coord.a); n<-n.r+n.a
+
+
+if(pred==TRUE){
+    n.p<-nrow(coord.p)
+    coord<-rbind(coord,coord.p); nnp<-n+n.p
+}
+
+#**************************************************************************
+#                   Distance matrix and Median distance
+#**************************************************************************
+
+ if(pred==TRUE)  DIST<-DISTANCE(coord,nnp)
+ if(pred==FALSE) DIST<-DISTANCE(coord,n)
+
+ Drr<-DIST[seq(1,n.r,1),seq(1,n.r,1)]
+ Dra<-DIST[seq(1,n.r,1),seq(n.r+1,n,1)]; Dar<-t(Dra) 
+ Daa<-DIST[seq(n.r+1,n,1),seq(n.r+1,n,1)];
+ if(pred==TRUE){
+   Drp<-DIST[seq(1,n.r,1),seq(n+1,nnp,1)]; Dpr<-t(Drp)
+   Dap<-DIST[seq(n.r+1,n,1),seq(n+1,nnp,1)]; Dpa<-t(Dap) 
+   Dpp<-DIST[seq(n+1,nnp,1),seq(n+1,nnp,1)]; 
+ }
+
+#**************************************************************************
+
+ IJ<-0; VDIST<-0
+ for(i in 1:(n-1)){
+    for(j in (i+1):n){
+	IJ<-IJ+1; VDIST[IJ]<-DIST[i,j]
+    }
+ }
+
+ d.med<-median(VDIST);  d.max<-max(VDIST)
+
+#**************************************************************************
+#      The initial values of parameters and latent; and Hyperparametrs
+#**************************************************************************
+
+d.phi<-hyper$D.phi   
+a.t<-(9/d.phi^2)*d.med^2/d.max^2
+l.t<-(9/d.phi)*d.med/d.max^2
+theta<-a.t/l.t
+
+kappa<-hyper$E.kappa;  
+Lk<-max(0,kappa-hyper$S.kappa)
+Uk<-min(2,kappa+hyper$S.kappa)
+
+sig2<-initial$sig2
+Ls<-hyper$Ls; Us<-hyper$Us
+
+tau2<-initial$tau2
+Lt<-hyper$Lt; Ut<-hyper$Ut
+
+beta<-hyper$m.b
+m.b<-beta;       c.b<-hyper$c.b;                 
+
+alpha<-initial$alpha
+m.a<-hyper$m.a;  c.a<-hyper$c.a; 
+La<-hyper$La;  Ua<-hyper$Ua
+
+U<-rep(sqrt(2/pi),n.r)
+Uc<-rep(0,n.r)
+
+#**************************************************************************
+#                  Correlatiotn matrix of latent variable
+#**************************************************************************
+
+  Car<-exp(-Dar^kappa/theta); Cra<-t(Car)
+  Crr<-exp(-Drr^kappa/theta); ICrr<-solve(Crr)
+
+  cor<-CORRELATION(Daa,theta,kappa)
+  Caa<-cor[[1]];ICaa<-cor[[2]];det.aa<-cor[[3]]
+
+  Omega<-Caa 
+  CHOL.O<-chol(Omega)
+  IO<-chol2inv(CHOL.O); det.o<-prod(diag(CHOL.O)^2)
+
+  L<-chol(Crr);    SL<-solve(L)
+  CL<-Car%*%SL; IOCL<-IO%*%CL; LCIOCL<-t(CL)%*%IOCL
+
+  Mu<-as.vector(-sqrt(2/pi)*alpha*CL%*%rep(1,n.r))
+
+#===========================================================================================
+
+#==============    Simulation of latent variables and parameters    ========================
+
+#===========================================================================================
+
+  D.tau<-c(); D.sig<-c(); D.beta<-c(); D.alpha<-c(); D.th<-c(); D.ka<-c()
+  Yp<-c();  
+
+  R1<-0; sim<-0; ac1<-0; ac2<-0
+ 
+  for(R in 1:simulate){
+
+#**************************************************************************
+#                       Update the latent variable H
+#**************************************************************************
+
+   S.h<-chol2inv(chol(diag(n.a)/tau2+IO/sig2))
+   M.h<-S.h%*%((Y-beta)/tau2+(alpha/sig2)*IOCL%*%Uc)
+   H<-as.vector(rmvnorm(1,as.vector(M.h),S.h))
+
+#**************************************************************************
+#                           full conditional of U  
+#**************************************************************************
+
+   S.u<-solve(diag(n.r)+alpha^2/sig2*LCIOCL)
+   m.u<-as.vector((alpha/sig2)*S.u%*%t(IOCL)%*%(H-Mu))
+   U<-as.vector(rtmvnorm(1,mean=m.u,sigma=S.u,lower=rep(0,n.r),upper=rep(Inf,n.r),algorithm="gibbs",burn.in.samples=1000,start.value=U))
+   Uc<-(U-sqrt(2/pi))
+
+#**************************************************************************
+#                       Update the parameters of beta
+#**************************************************************************
+   
+   v.b<-(n.a/tau2+1/c.b)^(-1)
+   beta<-rnorm(1,v.b*(sum(Y-H)/tau2+m.b/c.b),sqrt(v.b))
+
+#**************************************************************************
+#                       Update the parameters sig2
+#**************************************************************************
+
+    HCU<-H-alpha*CL%*%Uc
+    vv<-as.numeric(.5*t(HCU)%*%IO%*%HCU)
+    sig2<-rtigamma((n.a-1)/2,vv,Ls,Us); 
+
+#**************************************************************************
+#                       Update the parameters alpha
+#**************************************************************************
+
+   uu<-as.numeric(t(Uc)%*%LCIOCL%*%Uc); 
+   uh<-as.numeric(t(Uc)%*%t(IOCL)%*%H)
+   v.a<-(uu/sig2+1/c.a)^(-1)
+   alpha<-rtruncnorm(1,La,Ua,v.a*(uh/sig2+m.a/c.a),sqrt(v.a))
+
+  Mu<-as.vector(-sqrt(2/pi)*alpha*CL%*%rep(1,n.r))
+
+#**************************************************************************
+#                       Update the parameters of tau2
+#**************************************************************************
+  
+   yy<-as.numeric(.5*t(Y-beta-H)%*%(Y-beta-H))
+   tau2<-rtigamma((n.a-1)/2,yy,Lt,Ut); 
+
+#**************************************************************************
+#                       Update the parameters theta
+#**************************************************************************
+
+    cantheta<-round(rlnorm(1,log(theta),tuning[[1]]),2)
+
+    Car.c<-exp(-Dar^kappa/cantheta); Cra.c<-t(Car.c)
+    Crr.c<-exp(-Drr^kappa/cantheta);ICrr.c<-solve(Crr.c)
+
+    cor<-CORRELATION(Daa,cantheta,kappa)
+     Caa.c<-cor[[1]];ICaa.c<-cor[[2]];det.aa.c<-cor[[3]]
+
+    Omega.c<-Caa.c
+    CHOL.O<-chol(Omega.c)
+    IO.c<-chol2inv(CHOL.O); det.o.c<-prod(diag(CHOL.O)^2)
+
+    L.c<-chol(Crr.c);  SL.c<-solve(L.c)
+    CL.c<-Car.c%*%SL.c; 
+
+    if(det.o.c==0) det.o.c<-10^(-323)
+
+    ratio.candid<-cantheta/theta
+    ratio.prior<-dgamma(cantheta,a.t,l.t)/dgamma(theta,a.t,l.t)
+
+    lik.d<-(det.o.c^(-.5))*exp(-(.5/sig2)*t(H-alpha*CL.c%*%Uc)%*%IO.c%*%(H-alpha*CL.c%*%Uc))
+    lik.n<-(det.o^(-.5))*exp(-(.5/sig2)*t(H-alpha*CL%*%Uc)%*%IO%*%(H-alpha*CL%*%Uc))
+
+    r<-lik.d/lik.n*ratio.candid*ratio.prior
+
+      u<-runif(1,0,1)
+      if(u<r){
+	  theta<-cantheta
+ 	  Car<-Car.c;   Cra<-Cra.c
+	  det.aa<-det.aa.c; det.o<-det.o.c
+	  Crr<-Crr.c;   Caa<-Caa.c
+	  ICrr<-ICrr.c; ICaa<-ICaa.c
+        L<-L.c;    SL<-SL.c; CL<-CL.c; IO<-IO.c; Omega<-Omega.c; 
+        IOCL<-IO%*%CL; LCIOCL<-t(CL)%*%IOCL
+        Mu<-as.vector(-sqrt(2/pi)*alpha*CL%*%rep(1,n.r))
+        ac1<-ac1+1
+      }
+
+#**************************************************************************
+#                       Update the parameters kappa
+#**************************************************************************
+
+if(Fix.kappa==FALSE){
+    cankappa<-round(rlnorm(1,log(kappa),tuning[[2]]),2)
+   if(cankappa>Lk & cankappa<Uk){
+
+    Car.c<-exp(-Dar^cankappa/theta); Cra.c<-t(Car.c)
+    Crr.c<-exp(-Drr^cankappa/theta);ICrr.c<-solve(Crr.c)
+
+    cor<-CORRELATION(Daa,theta,cankappa)
+     Caa.c<-cor[[1]];ICaa.c<-cor[[2]];det.aa.c<-cor[[3]]
+
+    Omega.c<-Caa.c
+    CHOL.O<-chol(Omega.c)
+    IO.c<-chol2inv(CHOL.O); det.o.c<-prod(diag(CHOL.O)^2)
+
+    L.c<-chol(Crr.c);  SL.c<-solve(L.c)
+    CL.c<-Car.c%*%SL.c; 
+
+    if(det.o.c==0) det.o.c<-10^(-323)
+
+    ratio.candid<-cankappa/kappa
+
+    lik.d<-(det.o.c^(-.5))*exp(-(.5/sig2)*t(H-alpha*CL.c%*%Uc)%*%IO.c%*%(H-alpha*CL.c%*%Uc))
+    lik.n<-(det.o^(-.5))*exp(-(.5/sig2)*t(H-alpha*CL%*%Uc)%*%IO%*%(H-alpha*CL%*%Uc))
+
+    r<-lik.d/lik.n*ratio.candid
+
+      u<-runif(1,0,1)
+      if(u<r){
+	  kappa<-cankappa
+ 	  Car<-Car.c;   Cra<-Cra.c
+	  det.aa<-det.aa.c; det.o<-det.o.c
+	  Crr<-Crr.c;   Caa<-Caa.c
+	  ICrr<-ICrr.c; ICaa<-ICaa.c
+        L<-L.c;    SL<-SL.c; CL<-CL.c; IO<-IO.c; Omega<-Omega.c; 
+        IOCL<-IO%*%CL; LCIOCL<-t(CL)%*%IOCL
+        Mu<-as.vector(-sqrt(2/pi)*alpha*CL%*%rep(1,n.r))
+        ac2<-ac2+1
+      }
+    }
+  }
+
+#**************************************************************************
+#                             Save
+#**************************************************************************
+
+   if(R>burnin){
+	  R1<-R1+1
+      if(R1==Break){
+	  sim<-sim+1		
+
+#**************************************************************************
+#                       Save of simulated values of parameters
+#**************************************************************************
+
+  D.beta<-c(D.beta,beta)
+  D.sig<-c(D.sig,sig2)
+  D.tau<-c(D.tau,tau2)
+  D.th<-c(D.th,theta)
+  D.ka<-c(D.ka,kappa)
+  D.alpha<-c(D.alpha,alpha)
+
+  if(pred==TRUE){
+    H0<-predic(Dpr,Dpa,Dpp,IO,Car,SL,kappa,theta,sig2,beta,alpha,H,Uc)
+    Yp<-rbind(Yp,beta+H0); 
+  }
+
+#****************************************************************************
+  R1<-0
+            }  #End if R1==break  
+        }      #End if R>burnin
+
+  }            #End for R.simulate
+
+#****************************************************************************
+#                         **************************
+#                         *     R E S U L T        *
+#                         **************************
+#****************************************************************************
+
+
+print("beta")                                    
+E.beta<-summary(D.beta);     print(E.beta);  
+print("alpha")                                    
+E.alpha<-summary(D.alpha);   print(E.alpha);   
+print("sigma2")                                    
+E.sig2<-summary(D.sig);      print(E.sig2);    
+print("tau2")                                    
+E.tau2<-summary(D.tau);      print(E.tau2);    
+print("theta")                                    
+E.th<-summary(D.th);         print(E.th);    
+print("kappa")                                    
+E.ka<-summary(D.ka);         print(E.ka);   
+print("Acceptance rate");    print(c(ac1/simulate,ac2/simulate))                                    
+ 
+Simiulation<-list(Beta=D.beta,Sigma2=D.sig,Tau2=D.tau,Theta=D.th,Kappa=D.ka)
+
+#**************************************************************************
+#                         *  P R E D I C T I O N   *
+#**************************************************************************
+
+  if(pred==TRUE){
+       E.Y<-as.matrix(apply(Yp,2,mean))   
+       V.Y<-as.matrix(apply(Yp,2,var))
+       print(cbind(coord.p,E.Y,V.Y))
+       Simiulation<-list(Beta=D.beta,Sigma2=D.sig,Tau2=D.tau,Theta=D.th,Kappa=D.ka,Yp=Yp)    
+  }  
+ return(Simiulation)
+}     # END FUNCTION
+
+
+
+
